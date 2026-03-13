@@ -1,5 +1,11 @@
 <script setup>
-import { reactive } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import {
+  getBitableBaseSelection,
+  getBitableFields,
+  getBitableTables,
+  watchBitableSelectionChange
+} from '../services/bitable'
 
 defineProps({
   loading: {
@@ -21,7 +27,18 @@ const dataChannelOptions = [
   { label: '社交媒体', value: 'social' }
 ]
 
+const visibleDataChannelOptions = dataChannelOptions.filter(
+  item => item.value === 'review' || item.value === 'qa'
+)
+
 const getChannelLabel = (value) => dataChannelOptions.find(item => item.value === value)?.label || '未选择'
+
+const tableOptions = ref([])
+const fieldOptions = ref([])
+const bitableMessage = ref('')
+const tableLoading = ref(false)
+const fieldLoading = ref(false)
+let stopSelectionWatch = null
 
 const audienceOptions = [
   'GenZ世代(15-25岁)',
@@ -43,19 +60,96 @@ const formData = reactive({
   audiences: [...audienceOptions]
 })
 
-const tableOptions = ['用户反馈表', '商品评论表', '达人素材表']
-const fieldOptionsMap = {
-  用户反馈表: ['标题', '内容', '标签'],
-  商品评论表: ['商品名', '评论内容', '评分'],
-  达人素材表: ['脚本标题', '平台渠道', '互动量']
+const currentTable = computed(() => tableOptions.value.find(item => item.id === formData.table) || null)
+const currentField = computed(() => fieldOptions.value.find(item => item.id === formData.field) || null)
+
+const applySelection = async (selection) => {
+  if (!selection?.tableId) {
+    return
+  }
+
+  const hasMatchedTable = tableOptions.value.some(item => item.id === selection.tableId)
+  if (!hasMatchedTable) {
+    return
+  }
+
+  formData.table = selection.tableId
+  await loadFields(selection.tableId, selection.fieldId)
+}
+
+const loadFields = async (tableId = formData.table, preferredFieldId = '') => {
+  formData.field = ''
+  fieldOptions.value = []
+
+  if (!tableId) {
+    return
+  }
+
+  fieldLoading.value = true
+
+  try {
+    const fields = await getBitableFields(tableId)
+    fieldOptions.value = fields
+
+    const nextFieldId = preferredFieldId && fields.some(item => item.id === preferredFieldId)
+      ? preferredFieldId
+      : ''
+
+    formData.field = nextFieldId
+  } catch (error) {
+    bitableMessage.value = error.message || '读取字段失败'
+  } finally {
+    fieldLoading.value = false
+  }
+}
+
+const loadTables = async () => {
+  tableLoading.value = true
+  bitableMessage.value = ''
+
+  try {
+    const [tables, selection] = await Promise.all([
+      getBitableTables(),
+      getBitableBaseSelection().catch(() => null)
+    ])
+
+    tableOptions.value = tables
+
+    if (!tables.length) {
+      formData.table = ''
+      fieldOptions.value = []
+      bitableMessage.value = '当前账号暂无可访问的数据表'
+      return
+    }
+
+    if (selection?.tableId && tables.some(item => item.id === selection.tableId)) {
+      formData.table = selection.tableId
+      await loadFields(selection.tableId, selection.fieldId)
+      return
+    }
+
+    if (!tables.some(item => item.id === formData.table)) {
+      formData.table = ''
+    }
+
+    if (formData.table) {
+      await loadFields(formData.table)
+    }
+  } catch (error) {
+    bitableMessage.value = error.message || '读取数据表失败'
+    tableOptions.value = []
+    fieldOptions.value = []
+  } finally {
+    tableLoading.value = false
+  }
 }
 
 const handleModeChange = (mode) => {
   formData.mode = mode
 }
 
-const handleTableChange = () => {
-  formData.field = ''
+const handleTableChange = async () => {
+  await loadFields(formData.table)
 }
 
 const toggleAudience = (item) => {
@@ -71,24 +165,40 @@ const handleGenerate = () => {
   emit('generate', {
     mode: formData.mode,
     productName: formData.productName,
-    table: formData.table,
-    field: formData.field,
+    tableId: formData.table,
+    table: currentTable.value?.name || '',
+    fieldId: formData.field,
+    field: currentField.value?.name || '',
     channel: formData.channel,
     channelLabel: getChannelLabel(formData.channel),
     coreFeature: formData.coreFeature,
     audiences: [...formData.audiences],
     summary: formData.mode === 'data'
-      ? `根据数据生成 / ${formData.productName || '未填写'} / ${formData.table || '未选择'} / ${formData.field || '未选择'} / ${getChannelLabel(formData.channel)}`
+      ? `根据数据生成 / ${formData.productName || '未填写'} / ${currentTable.value?.name || '未选择'} / ${currentField.value?.name || '未选择'} / ${getChannelLabel(formData.channel)}`
       : `根据产品生成 / ${formData.productName || '未填写'} / ${formData.coreFeature || '未填写'}`
   })
 }
+
+onMounted(async () => {
+  await loadTables()
+
+  stopSelectionWatch = watchBitableSelectionChange(async (selection) => {
+    await applySelection(selection)
+  })
+})
+
+onBeforeUnmount(() => {
+  if (typeof stopSelectionWatch === 'function') {
+    stopSelectionWatch()
+  }
+})
 </script>
 
 <template>
   <section class="prototype-card">
     <div class="title-row">
       <div class="title-icon">&lt;/&gt;</div>
-      <h2>饭大写标签</h2>
+      <h2>饭大打标签</h2>
     </div>
 
     <div class="mode-row">
@@ -115,29 +225,31 @@ const handleGenerate = () => {
       <template v-if="formData.mode === 'data'">
         <div class="select-wrap">
           <select v-model="formData.table" class="prototype-input prototype-select" @change="handleTableChange">
-            <option disabled value="">选择数据表</option>
-            <option v-for="item in tableOptions" :key="item" :value="item">{{ item }}</option>
+            <option disabled value="">{{ tableLoading ? '加载数据表中...' : '选择数据表' }}</option>
+            <option v-for="item in tableOptions" :key="item.id" :value="item.id">{{ item.name }}</option>
           </select>
           <span class="select-arrow"></span>
         </div>
 
         <div class="select-wrap">
           <select v-model="formData.field" class="prototype-input prototype-select">
-            <option disabled value="">选择字段</option>
+            <option disabled value="">{{ fieldLoading ? '加载字段中...' : '选择字段' }}</option>
             <option
-              v-for="item in (fieldOptionsMap[formData.table] || [])"
-              :key="item"
-              :value="item"
+              v-for="item in fieldOptions"
+              :key="item.id"
+              :value="item.id"
             >
-              {{ item }}
+              {{ item.name }}
             </option>
           </select>
           <span class="select-arrow"></span>
         </div>
 
+        <p v-if="bitableMessage" class="bitable-message">{{ bitableMessage }}</p>
+
         <div class="choice-grid two-col radio-grid">
           <button
-            v-for="item in dataChannelOptions"
+            v-for="item in visibleDataChannelOptions"
             :key="item.value"
             type="button"
             class="choice-card"
@@ -331,6 +443,13 @@ const handleGenerate = () => {
   border-bottom: 1.5px solid #646a73;
   transform: translateY(-65%) rotate(45deg);
   pointer-events: none;
+}
+
+.bitable-message {
+  margin: -4px 2px 2px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #f53f3f;
 }
 
 .choice-grid {
