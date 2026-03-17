@@ -1,5 +1,5 @@
 {
-  "name": "Vue Template",
+  "name": "vue-template",
   "version": "1.0.0",
   "output": "dist",
   "scripts": {
@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@lark-base-open/js-sdk": "^0.5.0",
+    "@lark-base-open/node-sdk": "^1.0.1",
     "element-plus": "^2.3.6",
     "reset-css": "^5.0.1",
     "vue": "^3.2.37",
