@@ -270,6 +270,43 @@ const ensureSelectFieldOptions = async ({ table, fieldId, fieldType, values = []
   }
 }
 
+const getSelectFieldOptionMap = async ({ table, fieldId, fieldType }) => {
+  if (!fieldId || !isSingleSelectFieldType(fieldType)) {
+    return new Map()
+  }
+
+  const field = await table.getFieldById(fieldId)
+
+  if (typeof field?.getOptions !== 'function') {
+    return new Map()
+  }
+
+  const options = await field.getOptions()
+
+  return new Map(
+    options
+      .filter(option => option?.name && option?.id)
+      .map(option => [String(option.name).trim(), {
+        id: option.id,
+        text: option.name
+      }])
+  )
+}
+
+const buildFieldCellValue = ({ value, fieldType, optionMap = new Map() }) => {
+  const normalizedValue = String(value || '').trim()
+
+  if (!normalizedValue) {
+    return null
+  }
+
+  if (isSingleSelectFieldType(fieldType)) {
+    return optionMap.get(normalizedValue) || null
+  }
+
+  return normalizedValue
+}
+
 const ensureTagFields = async (table) => {
   const firstLevelField = await getOrCreateTagField(table, FIRST_LEVEL_TAG_FIELD_NAME)
   const secondLevelField = await getOrCreateTagField(table, SECOND_LEVEL_TAG_FIELD_NAME)
@@ -362,11 +399,25 @@ export const writeTagRowsToTable = async ({ tableId, rows = [], firstLevelTags =
       values: rowsToWrite.map(item => item.label2Tag)
     })
 
+    const firstLevelOptionMap = await getSelectFieldOptionMap({
+      table,
+      fieldId: firstLevelFieldId,
+      fieldType: firstLevelFieldType
+    })
+
+    const secondLevelOptionMap = await getSelectFieldOptionMap({
+      table,
+      fieldId: secondLevelFieldId,
+      fieldType: secondLevelFieldType
+    })
+
     console.log('字段映射:', {
       firstLevelFieldId,
       secondLevelFieldId,
       firstLevelFieldType,
-      secondLevelFieldType
+      secondLevelFieldType,
+      firstLevelOptions: Array.from(firstLevelOptionMap.keys()),
+      secondLevelOptions: Array.from(secondLevelOptionMap.keys())
     })
 
     if (mode === 'overwrite-selected') {
@@ -386,8 +437,16 @@ export const writeTagRowsToTable = async ({ tableId, rows = [], firstLevelTags =
       const recordsToUpdate = matchedRows.map((item, index) => ({
         recordId: recordIds[index],
         fields: {
-          [firstLevelFieldId]: item.label1Tag,
-          [secondLevelFieldId]: item.label2Tag
+          [firstLevelFieldId]: buildFieldCellValue({
+            value: item.label1Tag,
+            fieldType: firstLevelFieldType,
+            optionMap: firstLevelOptionMap
+          }),
+          [secondLevelFieldId]: buildFieldCellValue({
+            value: item.label2Tag,
+            fieldType: secondLevelFieldType,
+            optionMap: secondLevelOptionMap
+          })
         }
       }))
 
@@ -419,8 +478,16 @@ export const writeTagRowsToTable = async ({ tableId, rows = [], firstLevelTags =
 
     const result = await table.addRecords(rowsToWrite.map(item => ({
       fields: {
-        [firstLevelFieldId]: item.label1Tag,
-        [secondLevelFieldId]: item.label2Tag
+        [firstLevelFieldId]: buildFieldCellValue({
+          value: item.label1Tag,
+          fieldType: firstLevelFieldType,
+          optionMap: firstLevelOptionMap
+        }),
+        [secondLevelFieldId]: buildFieldCellValue({
+          value: item.label2Tag,
+          fieldType: secondLevelFieldType,
+          optionMap: secondLevelOptionMap
+        })
       }
     })))
 
