@@ -1,6 +1,9 @@
 import { bitable, FieldType } from '@lark-base-open/js-sdk'
 
 const DEFAULT_ERROR_MESSAGE = '当前环境未连接飞书多维表，请在飞书多维表扩展中打开插件进行联调。'
+const FIRST_LEVEL_TAG_FIELD_NAME = '一级标签'
+const SECOND_LEVEL_TAG_FIELD_NAME = '二级标签'
+const TAG_COLOR_IDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
 
 const normalizeBitableError = (error) => {
   const message = error?.message || error?.msg || ''
@@ -168,24 +171,114 @@ const normalizeTagRows = (rows = []) => rows
   }))
   .filter(item => item.label1Tag || item.label2Tag)
 
-const getOrCreateTextField = async (table, fieldName) => {
-  try {
-    return await table.getFieldIdByName(fieldName)
-  } catch (error) {
-    return await table.addField({
-      name: fieldName,
-      type: FieldType.Text
-    })
+const uniqueValues = (values = []) => [...new Set(values.filter(Boolean))]
+
+const buildFlatTagDisplayRows = ({ rows = [], firstLevelTags = [], secondLevelTags = [] } = {}) => {
+  const normalizedRows = normalizeTagRows(rows)
+  const resolvedFirstLevelTags = uniqueValues(
+    (Array.isArray(firstLevelTags) && firstLevelTags.length ? firstLevelTags : normalizedRows.map(item => item.label1Tag))
+  )
+  const resolvedSecondLevelTags = uniqueValues(
+    (Array.isArray(secondLevelTags) && secondLevelTags.length ? secondLevelTags : normalizedRows.map(item => item.label2Tag))
+  )
+  const rowCount = Math.max(resolvedFirstLevelTags.length, resolvedSecondLevelTags.length)
+
+  return Array.from({ length: rowCount }, (_, index) => ({
+    id: index + 1,
+    label1Tag: resolvedFirstLevelTags[index] || '',
+    label2Tag: resolvedSecondLevelTags[index] || ''
+  })).filter(item => item.label1Tag || item.label2Tag)
+}
+
+const normalizeFieldType = (fieldType) => String(fieldType || '')
+
+const isSingleSelectFieldType = (fieldType) => {
+  const normalizedFieldType = normalizeFieldType(fieldType)
+  return normalizedFieldType === String(FieldType.SingleSelect) || normalizedFieldType === 'SingleSelect' || normalizedFieldType === '3'
+}
+
+const buildColorSeed = (value = '') => String(value)
+  .split('')
+  .reduce((sum, char, index) => sum + char.charCodeAt(0) * (index + 1), 0)
+
+const resolveTagColor = (value = '') => TAG_COLOR_IDS[buildColorSeed(value) % TAG_COLOR_IDS.length]
+
+const getOrCreateTagField = async (table, fieldName) => {
+  const fieldMetaList = await table.getFieldMetaList()
+  const matchedField = fieldMetaList.find(item => item.name === fieldName)
+
+  if (matchedField) {
+    return {
+      fieldId: matchedField.id,
+      fieldType: matchedField.type
+    }
+  }
+
+  const fieldId = await table.addField({
+    name: fieldName,
+    type: FieldType.SingleSelect,
+    property: {
+      options: []
+    }
+  })
+
+  return {
+    fieldId,
+    fieldType: FieldType.SingleSelect
+  }
+}
+
+const ensureSelectFieldOptions = async ({ table, fieldId, fieldType, values = [] }) => {
+  if (!fieldId || !isSingleSelectFieldType(fieldType)) {
+    return
+  }
+
+  const optionValues = uniqueValues(values)
+
+  if (!optionValues.length) {
+    return
+  }
+
+  const field = await table.getFieldById(fieldId)
+
+  if (typeof field?.getOptions !== 'function') {
+    return
+  }
+
+  const options = await field.getOptions()
+  const existingNames = new Set(options.map(option => option?.name).filter(Boolean))
+  const missingOptions = optionValues
+    .filter(name => !existingNames.has(name))
+    .map(name => ({
+      name,
+      color: resolveTagColor(name)
+    }))
+
+  if (!missingOptions.length) {
+    return
+  }
+
+  if (typeof field.addOptions === 'function') {
+    await field.addOptions(missingOptions)
+    return
+  }
+
+  if (typeof field.addOption === 'function') {
+    for (const option of missingOptions) {
+      await field.addOption(option.name, option.color)
+    }
   }
 }
 
 const ensureTagFields = async (table) => {
-  const firstLevelFieldId = await getOrCreateTextField(table, '一级标签')
-  const secondLevelFieldId = await getOrCreateTextField(table, '二级标签')
+  const firstLevelField = await getOrCreateTagField(table, FIRST_LEVEL_TAG_FIELD_NAME)
+  const secondLevelField = await getOrCreateTagField(table, SECOND_LEVEL_TAG_FIELD_NAME)
 
   return {
-    firstLevelFieldId,
-    secondLevelFieldId
+    firstLevelFieldId: firstLevelField.fieldId,
+    secondLevelFieldId: secondLevelField.fieldId,
+    firstLevelFieldType: firstLevelField.fieldType,
+    secondLevelFieldType: secondLevelField.fieldType
   }
 }
 
@@ -222,14 +315,21 @@ const getRecordIdsForOverwrite = async ({ table, tableId }) => {
   }
 }
 
-export const writeTagRowsToTable = async ({ tableId, rows = [], mode = 'append' }) => {
+export const writeTagRowsToTable = async ({ tableId, rows = [], firstLevelTags = [], secondLevelTags = [], mode = 'append' }) => {
   if (!tableId) {
     throw new Error('缺少 tableId，无法写入数据表')
   }
 
   const normalizedRows = normalizeTagRows(rows)
+  const rowsToWrite = mode === 'append-deduplicated'
+    ? buildFlatTagDisplayRows({
+      rows: normalizedRows,
+      firstLevelTags,
+      secondLevelTags
+    })
+    : normalizedRows
 
-  if (!normalizedRows.length) {
+  if (!rowsToWrite.length) {
     throw new Error('暂无可写入的标签数据')
   }
 
@@ -237,14 +337,36 @@ export const writeTagRowsToTable = async ({ tableId, rows = [], mode = 'append' 
     console.group('[Bitable] writeTagRowsToTable')
     console.log('目标 tableId:', tableId)
     console.log('写入模式:', mode)
-    console.log('准备写入的标签数据:', normalizedRows)
+    console.log('原始标签数据:', normalizedRows)
+    console.log('实际写入的标签数据:', rowsToWrite)
 
     const table = await bitable.base.getTableById(tableId)
-    const { firstLevelFieldId, secondLevelFieldId } = await ensureTagFields(table)
+    const {
+      firstLevelFieldId,
+      secondLevelFieldId,
+      firstLevelFieldType,
+      secondLevelFieldType
+    } = await ensureTagFields(table)
+
+    await ensureSelectFieldOptions({
+      table,
+      fieldId: firstLevelFieldId,
+      fieldType: firstLevelFieldType,
+      values: rowsToWrite.map(item => item.label1Tag)
+    })
+
+    await ensureSelectFieldOptions({
+      table,
+      fieldId: secondLevelFieldId,
+      fieldType: secondLevelFieldType,
+      values: rowsToWrite.map(item => item.label2Tag)
+    })
 
     console.log('字段映射:', {
       firstLevelFieldId,
-      secondLevelFieldId
+      secondLevelFieldId,
+      firstLevelFieldType,
+      secondLevelFieldType
     })
 
     if (mode === 'overwrite-selected') {
@@ -258,10 +380,10 @@ export const writeTagRowsToTable = async ({ tableId, rows = [], mode = 'append' 
         throw new Error('目标数据表暂无可匹配记录，无法执行覆盖写入')
       }
 
-      const writableCount = Math.min(recordIds.length, normalizedRows.length)
-      const rowsToWrite = normalizedRows.slice(0, writableCount)
+      const writableCount = Math.min(recordIds.length, rowsToWrite.length)
+      const matchedRows = rowsToWrite.slice(0, writableCount)
 
-      const recordsToUpdate = rowsToWrite.map((item, index) => ({
+      const recordsToUpdate = matchedRows.map((item, index) => ({
         recordId: recordIds[index],
         fields: {
           [firstLevelFieldId]: item.label1Tag,
@@ -272,7 +394,7 @@ export const writeTagRowsToTable = async ({ tableId, rows = [], mode = 'append' 
       const result = await table.setRecords(recordsToUpdate)
 
       console.log('本次实际写入条数:', writableCount)
-      console.log('未写入的标签条数:', Math.max(normalizedRows.length - writableCount, 0))
+      console.log('未写入的标签条数:', Math.max(rowsToWrite.length - writableCount, 0))
 
       console.log('覆盖写入结果 recordIds:', result)
       console.groupEnd()
@@ -284,8 +406,8 @@ export const writeTagRowsToTable = async ({ tableId, rows = [], mode = 'append' 
         matchedRecordIds: recordIds,
         updatedCount: recordsToUpdate.length,
         ignoredMatchedRecordCount: Math.max(recordIds.length - recordsToUpdate.length, 0),
-        unwrittenRowCount: Math.max(normalizedRows.length - writableCount, 0),
-        requestedRowCount: normalizedRows.length,
+        unwrittenRowCount: Math.max(rowsToWrite.length - writableCount, 0),
+        requestedRowCount: rowsToWrite.length,
         matchedBy,
         viewId,
         fieldIds: {
@@ -295,7 +417,7 @@ export const writeTagRowsToTable = async ({ tableId, rows = [], mode = 'append' 
       }
     }
 
-    const result = await table.addRecords(normalizedRows.map(item => ({
+    const result = await table.addRecords(rowsToWrite.map(item => ({
       fields: {
         [firstLevelFieldId]: item.label1Tag,
         [secondLevelFieldId]: item.label2Tag
@@ -321,7 +443,7 @@ export const writeTagRowsToTable = async ({ tableId, rows = [], mode = 'append' 
   }
 }
 
-export const createTagTable = async ({ name, rows = [] }) => {
+export const createTagTable = async ({ name, rows = [], firstLevelTags = [], secondLevelTags = [] }) => {
   const tableName = String(name || '').trim()
 
   if (!tableName) {
@@ -339,12 +461,18 @@ export const createTagTable = async ({ name, rows = [] }) => {
       name: tableName,
       fields: [
         {
-          name: '一级标签',
-          type: FieldType.Text
+          name: FIRST_LEVEL_TAG_FIELD_NAME,
+          type: FieldType.SingleSelect,
+          property: {
+            options: []
+          }
         },
         {
-          name: '二级标签',
-          type: FieldType.Text
+          name: SECOND_LEVEL_TAG_FIELD_NAME,
+          type: FieldType.SingleSelect,
+          property: {
+            options: []
+          }
         }
       ]
     })
@@ -355,7 +483,9 @@ export const createTagTable = async ({ name, rows = [] }) => {
       await writeTagRowsToTable({
         tableId: createResult.tableId,
         rows: normalizedRows,
-        mode: 'append'
+        firstLevelTags,
+        secondLevelTags,
+        mode: 'append-deduplicated'
       })
     }
 

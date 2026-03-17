@@ -24,6 +24,18 @@ const handleGenerate = async (payload) => {
   generatedPayload.value = null
   streamingContent.value = ''
 
+  generatedPayload.value = {
+    ...payload,
+    generatedTags: {
+      raw: []
+    },
+    generationMeta: {
+      completedChunks: 0,
+      totalChunks: 0,
+      isComplete: false
+    }
+  }
+
   console.group('[App] 开始调用 DeepSeek 生成标签')
   console.log('触发时间:', new Date().toISOString())
   console.log('表单提交 payload:', payload)
@@ -41,6 +53,15 @@ const handleGenerate = async (payload) => {
         ...payload,
         sourceRecords,
         sourceTexts: sourceRecords.map(item => item.text)
+      }
+
+      generatedPayload.value = {
+        ...generatedPayload.value,
+        ...nextPayload,
+        generationMeta: {
+          ...generationProgress.value,
+          isComplete: false
+        }
       }
 
       console.log('[App] 读取到的原始字段数据:', sourceRecords)
@@ -105,7 +126,7 @@ const handleGenerate = async (payload) => {
     console.error('[App] 调用 DeepSeek 生成标签失败:', error)
 
     generatedPayload.value = {
-      ...payload,
+      ...(generatedPayload.value || payload),
       generatedTags: {
         raw: [],
         ...fallbackTags
@@ -143,6 +164,8 @@ const handleGenerate = async (payload) => {
         :summary="generatedPayload?.summary || ''"
         :table-name="generatedPayload?.productName ? `${generatedPayload.productName}-标签体系` : ''"
         :tag-rows="generatedPayload?.generatedTags?.raw || []"
+        :first-level-tags="generatedPayload?.generatedTags?.firstLevelTags || []"
+        :second-level-tags="generatedPayload?.generatedTags?.secondLevelTags || []"
         :source-table-id="generatedPayload?.tableId || ''"
         :source-table-name="generatedPayload?.table || ''"
         :is-generating="generating"
@@ -167,6 +190,6 @@ main {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 16px;
+  gap: 10px;
 }
 </style>

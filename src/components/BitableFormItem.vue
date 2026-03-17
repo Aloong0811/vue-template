@@ -296,7 +296,6 @@ onBeforeUnmount(() => {
 <style scoped>
 .prototype-card {
   width: 324px;
-  min-height: 480px;
   padding: 14px;
   box-sizing: border-box;
   background: #f5f6f8;

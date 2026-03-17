@@ -15,6 +15,14 @@ const props = defineProps({
     type: Array,
     default: () => []
   },
+  firstLevelTags: {
+    type: Array,
+    default: () => []
+  },
+  secondLevelTags: {
+    type: Array,
+    default: () => []
+  },
   sourceTableId: {
     type: String,
     default: ''
@@ -49,6 +57,8 @@ const tableOptions = ref([])
 const tableLoading = ref(false)
 const submitting = ref(false)
 const streamingContentRef = ref(null)
+const feedbackMessage = ref('')
+const feedbackType = ref('info')
 
 const escapeHtml = (value = '') => String(value)
   .replace(/&/g, '&amp;')
@@ -383,6 +393,20 @@ const renderMarkdownToHtml = (content = '') => {
 
 const streamingTagRows = computed(() => extractTagRowsFromMarkdown(props.streamingContent))
 
+const uniqueValues = (items = []) => [...new Set(items.filter(Boolean).map(item => String(item).trim()).filter(Boolean))]
+
+const flatEnumeratedTagRows = computed(() => {
+  const firstLevelTags = uniqueValues(props.firstLevelTags)
+  const secondLevelTags = uniqueValues(props.secondLevelTags)
+  const rowCount = Math.max(firstLevelTags.length, secondLevelTags.length)
+
+  return Array.from({ length: rowCount }, (_, index) => ({
+    id: index + 1,
+    label1Tag: firstLevelTags[index] || '',
+    label2Tag: secondLevelTags[index] || ''
+  })).filter(item => item.label1Tag || item.label2Tag)
+})
+
 const effectiveTagRows = computed(() => {
   if (Array.isArray(props.tagRows) && props.tagRows.length) {
     return props.tagRows
@@ -390,6 +414,8 @@ const effectiveTagRows = computed(() => {
 
   return streamingTagRows.value
 })
+
+const createModeTagRows = computed(() => flatEnumeratedTagRows.value.length ? flatEnumeratedTagRows.value : effectiveTagRows.value)
 
 const formData = reactive({
   action: 'create',
@@ -418,21 +444,32 @@ const normalizedTableOptions = computed(() => {
   return [currentTableOption.value, ...filteredOptions]
 })
 
-const canSubmit = computed(() => props.generationComplete && effectiveTagRows.value.length > 0)
+const canSubmit = computed(() => {
+  const rows = formData.action === 'create' ? createModeTagRows.value : effectiveTagRows.value
+  return props.generationComplete && rows.length > 0
+})
 
-const showStreamingPanel = computed(() => Boolean(props.streamingContent))
+const showStreamingPanel = computed(() => props.isGenerating || Boolean(props.streamingContent))
 
 const renderedStreamingHtml = computed(() => renderMarkdownToHtml(props.streamingContent))
 
-const streamingStatusText = computed(() => (props.isGenerating ? 'DeepSeek 正在思考…' : 'DeepSeek 回复完成'))
-
-const streamingDescription = computed(() => {
-  if (props.isGenerating) {
-    return '内容正在实时生成，展示效果会随着模型输出持续刷新'
+const streamingPlaceholder = computed(() => {
+  if (!props.isGenerating) {
+    return ''
   }
 
-  return '以下为本次生成的完整 Markdown 内容'
+  if (props.streamingContent) {
+    return ''
+  }
+
+  if (props.totalChunks > 0) {
+    return '正在等待 DeepSeek 返回首批内容，标签结果会在这里实时刷新…'
+  }
+
+  return '正在准备请求并等待 DeepSeek 开始输出，请稍候…'
 })
+
+const streamingStatusText = computed(() => (props.isGenerating ? 'AI 标签生成中…' : 'AI 标签生成完成'))
 
 const hintText = computed(() => {
   if (!props.generationComplete) {
@@ -444,11 +481,15 @@ const hintText = computed(() => {
   }
 
   if (!effectiveTagRows.value.length) {
+    if (formData.action === 'create' && createModeTagRows.value.length) {
+      return '将一级标签和二级标签枚举后平铺写入新数据表'
+    }
+
     return '当前暂无可写入的标签数据'
   }
 
   if (formData.action === 'create') {
-    return '创建新的页签，并写入标签数据'
+    return '创建新的页签，并将一级标签、二级标签分别枚举后平铺写入'
   }
 
   const selectedTarget = normalizedTableOptions.value.find(item => item.id === formData.selectedTable)
@@ -457,10 +498,9 @@ const hintText = computed(() => {
     : '将标签按顺序写入当前选择的数据表，并自动补齐一级/二级标签字段'
 })
 
-const notify = (message) => {
-  if (typeof window !== 'undefined' && typeof window.alert === 'function') {
-    window.alert(message)
-  }
+const setFeedback = (message, type = 'info') => {
+  feedbackMessage.value = message
+  feedbackType.value = type
 }
 
 const loadTables = async () => {
@@ -515,35 +555,49 @@ watch(
 
 const handleSubmit = async () => {
   if (!props.generationComplete) {
-    notify('请等待标签数据全部聚合完成后，再创建或写入数据表')
+    setFeedback('请等待标签数据全部聚合完成后，再创建或写入数据表', 'warning')
     return
   }
 
   if (!effectiveTagRows.value.length) {
-    notify('当前暂无可写入的标签数据')
+    if (!(formData.action === 'create' && createModeTagRows.value.length)) {
+      setFeedback('当前暂无可写入的标签数据', 'warning')
+      return
+    }
+  }
+
+  const submitRows = formData.action === 'create'
+    ? createModeTagRows.value
+    : effectiveTagRows.value
+
+  if (!submitRows.length) {
+    setFeedback('当前暂无可写入的标签数据', 'warning')
     return
   }
 
   submitting.value = true
+  feedbackMessage.value = ''
 
   try {
     if (formData.action === 'create') {
       const result = await createTagTable({
         name: formData.tableName,
-        rows: effectiveTagRows.value
+        rows: submitRows.map(item => ({ ...item })),
+        firstLevelTags: props.firstLevelTags,
+        secondLevelTags: props.secondLevelTags
       })
 
       await loadTables()
       formData.action = 'write'
       formData.selectedTable = result.tableId
-      notify(`创建成功，已写入新数据表（tableId: ${result.tableId}）`)
+      setFeedback(`创建成功，已将全部枚举标签写入新数据表（tableId: ${result.tableId}）`, 'success')
       return
     }
 
     const targetTableId = formData.selectedTable || props.sourceTableId
     const result = await writeTagRowsToTable({
       tableId: targetTableId,
-      rows: effectiveTagRows.value,
+      rows: submitRows,
       mode: 'overwrite-selected'
     })
 
@@ -555,10 +609,10 @@ const handleSubmit = async () => {
       ? `；由于当前仅匹配到 ${result.updatedCount} 条记录，另有 ${result.unwrittenRowCount} 条标签未写入`
       : ''
 
-    notify(`写入成功，共更新 ${result.updatedCount} 条记录${ignoredText}${unwrittenText}，目标 tableId: ${result.tableId}`)
+    setFeedback(`写入成功，共更新 ${result.updatedCount} 条记录${ignoredText}${unwrittenText}，目标 tableId: ${result.tableId}`, 'success')
   } catch (error) {
     console.error('[TagTablePage] 写入数据表失败:', error)
-    notify(error.message || '写入数据表失败')
+    setFeedback(error.message || '写入数据表失败', 'error')
   } finally {
     submitting.value = false
   }
@@ -582,14 +636,16 @@ onMounted(async () => {
           <span class="streaming-avatar">D</span>
           <div class="streaming-meta">
             <span class="streaming-title">{{ streamingStatusText }}</span>
-            <span class="streaming-subtitle">{{ streamingDescription }}</span>
           </div>
         </div>
         <span v-if="isGenerating" class="streaming-indicator"></span>
       </div>
-      <div ref="streamingContentRef" class="streaming-content markdown-body" v-html="renderedStreamingHtml"></div>
-      <div v-if="streamingTagRows.length" class="streaming-tags-hint">
-        已从 Markdown 表格中解析出 {{ streamingTagRows.length }} 条一级/二级标签
+      <div ref="streamingContentRef" class="streaming-content markdown-body">
+        <div v-if="renderedStreamingHtml" v-html="renderedStreamingHtml"></div>
+        <div v-else-if="streamingPlaceholder" class="streaming-placeholder">
+          <span class="streaming-placeholder-dot"></span>
+          <span>{{ streamingPlaceholder }}</span>
+        </div>
       </div>
     </div>
 
@@ -638,6 +694,7 @@ onMounted(async () => {
       </div>
 
       <p class="hint-text">{{ hintText }}</p>
+      <p v-if="feedbackMessage" class="feedback-text" :class="`feedback-${feedbackType}`">{{ feedbackMessage }}</p>
     </template>
 
     <template v-else>
@@ -656,6 +713,7 @@ onMounted(async () => {
       </div>
 
       <p class="hint-text">{{ hintText }}</p>
+      <p v-if="feedbackMessage" class="feedback-text" :class="`feedback-${feedbackType}`">{{ feedbackMessage }}</p>
     </template>
   </section>
 </template>
@@ -663,7 +721,6 @@ onMounted(async () => {
 <style scoped>
 .prototype-card {
   width: 324px;
-  min-height: 480px;
   padding: 14px;
   box-sizing: border-box;
   background: #f5f6f8;
@@ -742,8 +799,7 @@ onMounted(async () => {
 
 .streaming-meta {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
 }
 
 .streaming-indicator {
@@ -771,11 +827,6 @@ onMounted(async () => {
   color: #1f2329;
 }
 
-.streaming-subtitle {
-  font-size: 12px;
-  color: #667085;
-}
-
 .streaming-content {
   max-height: 320px;
   overflow-y: auto;
@@ -786,11 +837,22 @@ onMounted(async () => {
   background: linear-gradient(180deg, #ffffff 0%, #fbfcff 100%);
 }
 
-.streaming-tags-hint {
-  padding: 10px 16px 14px;
-  font-size: 12px;
-  color: #3370ff;
-  background: linear-gradient(180deg, rgba(51, 112, 255, 0.04) 0%, rgba(51, 112, 255, 0.08) 100%);
+.streaming-placeholder {
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #667085;
+}
+
+.streaming-placeholder-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: #3370ff;
+  box-shadow: 0 0 0 6px rgba(51, 112, 255, 0.12);
+  animation: pulse 1.5s ease-in-out infinite;
 }
 
 .markdown-body :deep(h1),
@@ -1118,6 +1180,28 @@ onMounted(async () => {
   margin: 18px 2px 0;
   font-size: 14px;
   line-height: 1.6;
+  color: #4e5969;
+}
+
+.feedback-text {
+  margin: 10px 2px 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.feedback-success {
+  color: #0f9f61;
+}
+
+.feedback-error {
+  color: #d92d20;
+}
+
+.feedback-warning {
+  color: #b54708;
+}
+
+.feedback-info {
   color: #4e5969;
 }
 </style>

@@ -20,8 +20,13 @@ const DEFAULT_SECOND_LEVEL_TAGS = [
 
 const DEEPSEEK_BASE_URL = import.meta.env.VITE_DEEPSEEK_BASE_URL || 'https://api.deepseek.com'
 const DEEPSEEK_API_KEY = import.meta.env.VITE_DEEPSEEK_API_KEY || ''
+const DEEPSEEK_API_KEY_ENCRYPTED = import.meta.env.VITE_DEEPSEEK_API_KEY_ENCRYPTED || ''
+const DEEPSEEK_API_KEY_SECRET = import.meta.env.VITE_DEEPSEEK_API_KEY_SECRET || ''
 const DEEPSEEK_MODEL = import.meta.env.VITE_DEEPSEEK_MODEL || 'deepseek-chat'
 const DEEPSEEK_FAST_MODEL = import.meta.env.VITE_DEEPSEEK_FAST_MODEL || DEEPSEEK_MODEL
+const DEEPSEEK_ENCRYPTED_KEY_PREFIX = 'enc-v2:'
+const DEEPSEEK_ENCRYPTION_KEY_LENGTH = 32
+const DEEPSEEK_PBKDF2_ITERATIONS = 120000
 
 const resolvePositiveNumber = (value, fallback) => {
   const parsed = Number(value)
@@ -38,7 +43,6 @@ const DEEPSEEK_PREVIEW_MAX_OUTPUT_TOKENS = resolvePositiveNumber(import.meta.env
 const DEEPSEEK_DATA_TEMPERATURE = resolvePositiveNumber(import.meta.env.VITE_DEEPSEEK_DATA_TEMPERATURE, 0.2)
 const DEEPSEEK_PRODUCT_TEMPERATURE = resolvePositiveNumber(import.meta.env.VITE_DEEPSEEK_PRODUCT_TEMPERATURE, 0.35)
 const DEEPSEEK_TOP_P = resolvePositiveNumber(import.meta.env.VITE_DEEPSEEK_TOP_P, 0.8)
-const DEEPSEEK_MAX_TAG_COUNT = resolvePositiveNumber(import.meta.env.VITE_DEEPSEEK_MAX_TAG_COUNT, 20)
 
 const SYSTEM_PROMPT = [
   '你是中文电商标签归纳助手。',
@@ -51,6 +55,97 @@ const MARKDOWN_TABLE_TEMPLATE = [
   '| 一级标签 | 二级标签 |',
   '| --- | --- |'
 ].join('\n')
+
+let resolvedDeepSeekApiKeyPromise = null
+
+const decodeBase64ToBytes = (value = '') => Uint8Array.from(atob(String(value || '')), char => char.charCodeAt(0))
+
+const decodeBase64Json = (value = '') => {
+  const bytes = decodeBase64ToBytes(value)
+  return JSON.parse(new TextDecoder().decode(bytes))
+}
+
+const decryptDeepSeekApiKey = async (encryptedPayload, secret) => {
+  const normalizedPayload = String(encryptedPayload || '').trim()
+  const normalizedSecret = String(secret || '').trim()
+
+  if (!normalizedPayload || !normalizedSecret) {
+    return ''
+  }
+
+  if (!normalizedPayload.startsWith(DEEPSEEK_ENCRYPTED_KEY_PREFIX)) {
+    throw new Error('DeepSeek 加密 Key 格式不正确')
+  }
+
+  if (typeof window === 'undefined' || !window.crypto?.subtle) {
+    throw new Error('当前环境不支持浏览器解密能力')
+  }
+
+  const payload = decodeBase64Json(normalizedPayload.slice(DEEPSEEK_ENCRYPTED_KEY_PREFIX.length))
+  const textEncoder = new TextEncoder()
+  const passwordKey = await window.crypto.subtle.importKey(
+    'raw',
+    textEncoder.encode(normalizedSecret),
+    'PBKDF2',
+    false,
+    ['deriveKey']
+  )
+
+  const derivedKey = await window.crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      salt: decodeBase64ToBytes(payload.salt),
+      iterations: Number(payload.iterations) || DEEPSEEK_PBKDF2_ITERATIONS,
+      hash: 'SHA-256'
+    },
+    passwordKey,
+    {
+      name: 'AES-GCM',
+      length: DEEPSEEK_ENCRYPTION_KEY_LENGTH * 8
+    },
+    false,
+    ['decrypt']
+  )
+
+  const encryptedBytes = decodeBase64ToBytes(payload.data)
+  const authTagBytes = decodeBase64ToBytes(payload.tag)
+  const cipherBytes = new Uint8Array(encryptedBytes.length + authTagBytes.length)
+
+  cipherBytes.set(encryptedBytes, 0)
+  cipherBytes.set(authTagBytes, encryptedBytes.length)
+
+  const decrypted = await window.crypto.subtle.decrypt(
+    {
+      name: 'AES-GCM',
+      iv: decodeBase64ToBytes(payload.iv),
+      tagLength: authTagBytes.length * 8
+    },
+    derivedKey,
+    cipherBytes
+  )
+
+  return new TextDecoder().decode(decrypted)
+}
+
+const resolveDeepSeekApiKeyValue = async () => {
+  if (DEEPSEEK_API_KEY) {
+    return DEEPSEEK_API_KEY
+  }
+
+  if (DEEPSEEK_API_KEY_ENCRYPTED && DEEPSEEK_API_KEY_SECRET) {
+    return decryptDeepSeekApiKey(DEEPSEEK_API_KEY_ENCRYPTED, DEEPSEEK_API_KEY_SECRET)
+  }
+
+  return ''
+}
+
+const getDeepSeekApiKey = async () => {
+  if (!resolvedDeepSeekApiKeyPromise) {
+    resolvedDeepSeekApiKeyPromise = resolveDeepSeekApiKeyValue()
+  }
+
+  return resolvedDeepSeekApiKeyPromise
+}
 
 const compactText = (value = '', maxLength = DEEPSEEK_MAX_TEXT_LENGTH) => String(value || '')
   .replace(/\s+/g, ' ')
@@ -113,7 +208,7 @@ const buildReviewPrompt = (payload) => {
     '任务：根据评价数据，快速归纳高频标签。',
     data,
     '规则：',
-    `1. 只输出 ${DEEPSEEK_MAX_TAG_COUNT} 条以内最重要标签。`,
+    '1. 根据样本内容尽可能完整输出高价值标签，不要人为限制标签条数。',
     '2. 一级标签必须是宏观维度；二级标签必须是具体诉求/痛点/场景。',
     '3. 去重、避免近义词重复、优先高频高价值标签。',
     '4. 不要输出分析过程、说明、结论、编号列表。',
@@ -129,7 +224,7 @@ const buildQaPrompt = (payload) => {
     `任务：根据购买前问答数据，归纳消费者最关心的问题标签（产品：${payload.productName || '产品名称'}）。`,
     data,
     '规则：',
-    `1. 只输出 ${DEEPSEEK_MAX_TAG_COUNT} 条以内标签。`,
+    '1. 根据样本内容尽可能完整输出高价值标签，不要人为限制标签条数。',
     '2. 一级标签体现问题维度，二级标签体现具体关注点。',
     '3. 去重、合并近义项，按关注度从高到低排序。',
     '4. 不要解释，不要输出任何表格之外的内容。',
@@ -149,7 +244,7 @@ const buildProductPrompt = (payload) => {
     `目标人群：${audienceSummary}`,
     data,
     '规则：',
-    `1. 只输出 ${DEEPSEEK_MAX_TAG_COUNT} 条以内高价值标签。`,
+    '1. 根据产品信息尽可能完整输出高价值标签，不要人为限制标签条数。',
     '2. 一级标签体现购买决策维度，二级标签体现具体诉求。',
     '3. 优先输出对转化影响最大的标签，不要展开分析。',
     '4. 不要输出 JSON、不要输出调研报告、不要输出额外说明。',
@@ -165,7 +260,7 @@ const buildGenericPrompt = (payload) => {
     '任务：基于业务信息生成标签。',
     data,
     '规则：',
-    `1. 只输出 ${DEEPSEEK_MAX_TAG_COUNT} 条以内标签。`,
+    '1. 根据输入信息尽可能完整输出标签，不要人为限制标签条数。',
     '2. 一级标签是宏观维度，二级标签是具体描述。',
     '3. 去重并按重要性排序。',
     '4. 仅输出 Markdown 表格，不要解释。',
@@ -472,7 +567,7 @@ const uniqueValues = (items) => [...new Set(items.filter(Boolean))]
 const buildNormalizedResultFromRows = (rows) => {
   const seen = new Set()
 
-  const cleaned = rows
+  const cleanedRows = rows
     .map((item, index) => ({
       id: item?.id || index + 1,
       label1Tag: String(item?.label1Tag || '').trim(),
@@ -493,6 +588,8 @@ const buildNormalizedResultFromRows = (rows) => {
       ...item,
       id: index + 1
     }))
+
+  const cleaned = cleanedRows
 
   if (!cleaned.length) {
     return {
@@ -528,7 +625,7 @@ const normalizeSourceRecord = (item, index = 0) => {
   }
 }
 
-const getNormalizedSourceRecords = (payload) => {
+const normalizePayloadSourceRecords = (payload = {}) => {
   const sourceRecords = Array.isArray(payload?.sourceRecords) && payload.sourceRecords.length
     ? payload.sourceRecords
     : Array.isArray(payload?.sourceTexts)
@@ -538,52 +635,11 @@ const getNormalizedSourceRecords = (payload) => {
       }))
       : []
 
-  return sourceRecords
+  const normalizedSourceRecords = sourceRecords
     .map((item, index) => normalizeSourceRecord(item, index))
     .filter(Boolean)
-}
 
-const createSourceRecordChunks = (payload, chunkSize = DEEPSEEK_BATCH_SIZE) => {
-  const sourceRecords = getNormalizedSourceRecords(payload)
-
-  if (!sourceRecords.length) {
-    return []
-  }
-
-  const chunks = []
-
-  for (let index = 0; index < sourceRecords.length; index += chunkSize) {
-    chunks.push(sourceRecords.slice(index, index + chunkSize))
-  }
-
-  return chunks
-}
-
-const createChunkPayload = (payload, sourceRecordsChunk = []) => ({
-  ...payload,
-  sourceRecords: sourceRecordsChunk,
-  sourceTexts: sourceRecordsChunk.map(item => item?.text || '')
-})
-
-const createPreviewPayload = (payload, previewSize = DEEPSEEK_PREVIEW_BATCH_SIZE) => {
-  const sourceRecords = getNormalizedSourceRecords(payload)
-
-  if (!sourceRecords.length || sourceRecords.length <= previewSize) {
-    return null
-  }
-
-  const sampled = []
-  const step = Math.max(Math.floor(sourceRecords.length / previewSize), 1)
-
-  for (let index = 0; index < sourceRecords.length && sampled.length < previewSize; index += step) {
-    sampled.push(sourceRecords[index])
-  }
-
-  if (!sampled.length) {
-    return null
-  }
-
-  return createChunkPayload(payload, sampled)
+  return normalizedSourceRecords
 }
 
 const normalizeRawRows = (items) => unwrapTagPayload(items)
@@ -599,10 +655,6 @@ const normalizeTags = (items, payload = {}) => {
 
   return buildNormalizedResultFromRows(rows)
 }
-
-const mergeTagResults = (results = []) => buildNormalizedResultFromRows(
-  results.flatMap(result => Array.isArray(result?.raw) ? result.raw : [])
-)
 
 export const getFallbackTags = () => ({
   firstLevelTags: DEFAULT_FIRST_LEVEL_TAGS,
@@ -648,8 +700,10 @@ const resolveRequestOptions = (payload, options = {}) => {
 }
 
 const requestTagTableOnce = async (payload, onStreamChunk = null, requestOptions = {}) => {
-  if (!DEEPSEEK_API_KEY) {
-    throw new Error('缺少 DeepSeek API Key，请在 .env.local 中配置 VITE_DEEPSEEK_API_KEY')
+  const deepSeekApiKey = await getDeepSeekApiKey()
+
+  if (!deepSeekApiKey) {
+    throw new Error('缺少 DeepSeek API Key，请在 .env.local 中配置 VITE_DEEPSEEK_API_KEY 或加密后的 VITE_DEEPSEEK_API_KEY_ENCRYPTED')
   }
 
   const resolvedRequestOptions = resolveRequestOptions(payload, requestOptions)
@@ -700,7 +754,7 @@ const requestTagTableOnce = async (payload, onStreamChunk = null, requestOptions
     headers: {
       'Content-Type': 'application/json',
       Accept: 'text/event-stream',
-      Authorization: `Bearer ${DEEPSEEK_API_KEY}`
+      Authorization: `Bearer ${deepSeekApiKey}`
     },
     body: JSON.stringify(requestBody)
   })
@@ -787,107 +841,22 @@ const requestTagTableOnce = async (payload, onStreamChunk = null, requestOptions
 
 export const generateTagTable = async (payload, options = {}) => {
   const { onProgress, onStreamChunk } = options
-  const sourceRecordChunks = payload?.mode === 'data'
-    ? createSourceRecordChunks(payload)
-    : []
-
-  if (sourceRecordChunks.length <= 1) {
-    const singleResult = await requestTagTableOnce(payload, onStreamChunk)
-
-    if (typeof onProgress === 'function') {
-      onProgress({
-        result: singleResult,
-        completedChunks: 1,
-        totalChunks: 1,
-        isComplete: true
-      })
-    }
-
-    return singleResult
+  const normalizedSourceRecords = normalizePayloadSourceRecords(payload)
+  const normalizedPayload = {
+    ...payload,
+    sourceRecords: normalizedSourceRecords,
+    sourceTexts: normalizedSourceRecords.map(item => item.text)
   }
+  const result = await requestTagTableOnce(normalizedPayload, onStreamChunk)
 
-  console.group('[DeepSeek] 批量异步生成标签')
-  console.log('总数据量:', sourceRecordChunks.reduce((sum, chunk) => sum + chunk.length, 0))
-  console.log('分片数量:', sourceRecordChunks.length)
-  console.log('分片大小:', DEEPSEEK_BATCH_SIZE)
-  console.log('最大并发数:', DEEPSEEK_MAX_CONCURRENCY)
-
-  const chunkResults = new Array(sourceRecordChunks.length)
-  let completedChunks = 0
-  let streamedContent = ''
-  const previewPayload = createPreviewPayload(payload)
-
-  const emitProgress = (isComplete = false) => {
-    if (typeof onProgress !== 'function') {
-      return
-    }
-
+  if (typeof onProgress === 'function') {
     onProgress({
-      result: mergeTagResults(chunkResults.filter(Boolean)),
-      completedChunks,
-      totalChunks: sourceRecordChunks.length,
-      isComplete
+      result,
+      completedChunks: 1,
+      totalChunks: 1,
+      isComplete: true
     })
   }
 
-  if (previewPayload) {
-    try {
-      const previewResult = await requestTagTableOnce(previewPayload, onStreamChunk, { isPreview: true })
-
-      if (typeof onProgress === 'function') {
-        onProgress({
-          result: previewResult,
-          completedChunks: 0,
-          totalChunks: sourceRecordChunks.length,
-          isComplete: false
-        })
-      }
-    } catch (error) {
-      console.warn('[DeepSeek] 预览标签生成失败，继续执行正式分片:', error)
-    }
-  }
-
-  let nextChunkIndex = 0
-
-  const runChunkWorker = async () => {
-    while (nextChunkIndex < sourceRecordChunks.length) {
-      const currentIndex = nextChunkIndex
-      nextChunkIndex += 1
-
-      const chunk = sourceRecordChunks[currentIndex]
-      const chunkPayload = createChunkPayload(payload, chunk)
-      let currentChunkContent = ''
-
-      try {
-        const result = await requestTagTableOnce(chunkPayload, previewPayload ? null : (chunkText, chunkFullContent) => {
-          currentChunkContent = chunkFullContent
-
-          if (typeof onStreamChunk === 'function') {
-            onStreamChunk(chunkText, `${streamedContent}${chunkFullContent}`)
-          }
-        })
-
-        if (!previewPayload) {
-          streamedContent += currentChunkContent
-        }
-
-        chunkResults[currentIndex] = result
-      } catch (error) {
-        console.error(`[DeepSeek] 分片 ${currentIndex + 1}/${sourceRecordChunks.length} 处理失败:`, error)
-      } finally {
-        completedChunks += 1
-        emitProgress(completedChunks === sourceRecordChunks.length)
-      }
-    }
-  }
-
-  const workerCount = Math.min(DEEPSEEK_MAX_CONCURRENCY, sourceRecordChunks.length)
-  await Promise.all(Array.from({ length: workerCount }, () => runChunkWorker()))
-
-  const aggregated = mergeTagResults(chunkResults.filter(Boolean))
-  emitProgress(true)
-  console.log('聚合后的标签结果:', aggregated)
-  console.groupEnd()
-
-  return aggregated
+  return result
 }
