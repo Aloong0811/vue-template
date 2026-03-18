@@ -489,13 +489,13 @@ const hintText = computed(() => {
   }
 
   if (formData.action === 'create') {
-    return '创建新的页签，并将一级标签、二级标签分别枚举后平铺写入'
+    return '创建新的页签，并将标签写入 A.一级标签 / A.二级标签 两列'
   }
 
   const selectedTarget = normalizedTableOptions.value.find(item => item.id === formData.selectedTable)
   return selectedTarget
-    ? `将标签按顺序写入「${selectedTarget.name}」的现有记录`
-    : '将标签按顺序写入当前选择的数据表，并自动补齐一级/二级标签字段'
+    ? `将为「${selectedTarget.name}」在右侧新增 A/B/C... 版本标签列，并按顺序写入记录，不覆盖已有标签列内容`
+    : '将为当前选择的数据表在右侧新增 A/B/C... 版本标签列，并按顺序写入记录'
 })
 
 const setFeedback = (message, type = 'info') => {
@@ -590,7 +590,7 @@ const handleSubmit = async () => {
       await loadTables()
       formData.action = 'write'
       formData.selectedTable = result.tableId
-      setFeedback(`创建成功，已将全部枚举标签写入新数据表（tableId: ${result.tableId}）`, 'success')
+      setFeedback(`创建成功，已写入新数据表列「${result.fieldNames?.firstLevelFieldName || 'A.一级标签'} / ${result.fieldNames?.secondLevelFieldName || 'A.二级标签'}」（tableId: ${result.tableId}）`, 'success')
       return
     }
 
@@ -598,7 +598,7 @@ const handleSubmit = async () => {
     const result = await writeTagRowsToTable({
       tableId: targetTableId,
       rows: submitRows,
-      mode: 'overwrite-selected'
+      mode: 'append-versioned-columns'
     })
 
     const ignoredText = result.ignoredMatchedRecordCount
@@ -609,7 +609,7 @@ const handleSubmit = async () => {
       ? `；由于当前仅匹配到 ${result.updatedCount} 条记录，另有 ${result.unwrittenRowCount} 条标签未写入`
       : ''
 
-    setFeedback(`写入成功，共更新 ${result.updatedCount} 条记录${ignoredText}${unwrittenText}，目标 tableId: ${result.tableId}`, 'success')
+    setFeedback(`写入成功，已新增列「${result.fieldNames?.firstLevelFieldName || ''} / ${result.fieldNames?.secondLevelFieldName || ''}」，共写入 ${result.updatedCount} 条记录${ignoredText}${unwrittenText}，目标 tableId: ${result.tableId}`, 'success')
   } catch (error) {
     console.error('[TagTablePage] 写入数据表失败:', error)
     setFeedback(error.message || '写入数据表失败', 'error')

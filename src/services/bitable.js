@@ -3,7 +3,10 @@ import { bitable, FieldType } from '@lark-base-open/js-sdk'
 const DEFAULT_ERROR_MESSAGE = '当前环境未连接飞书多维表，请在飞书多维表扩展中打开插件进行联调。'
 const FIRST_LEVEL_TAG_FIELD_NAME = '一级标签'
 const SECOND_LEVEL_TAG_FIELD_NAME = '二级标签'
+const PRIMARY_TEXT_FIELD_NAME = '文本'
 const TAG_COLOR_IDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+const VERSION_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+const DEFAULT_VERSION_LABEL = 'A'
 
 const normalizeBitableError = (error) => {
   const message = error?.message || error?.msg || ''
@@ -173,6 +176,62 @@ const normalizeTagRows = (rows = []) => rows
 
 const uniqueValues = (values = []) => [...new Set(values.filter(Boolean))]
 
+const delay = (ms = 0) => new Promise(resolve => setTimeout(resolve, ms))
+
+const normalizeFieldName = (value = '') => String(value || '').trim()
+
+const versionLabelToIndex = (label = '') => String(label || '')
+  .trim()
+  .split('')
+  .reduce((result, char) => result * VERSION_ALPHABET.length + VERSION_ALPHABET.indexOf(char) + 1, 0) - 1
+
+const indexToVersionLabel = (index = 0) => {
+  let current = Number(index)
+
+  if (!Number.isInteger(current) || current < 0) {
+    return DEFAULT_VERSION_LABEL
+  }
+
+  let label = ''
+
+  while (current >= 0) {
+    label = VERSION_ALPHABET[current % VERSION_ALPHABET.length] + label
+    current = Math.floor(current / VERSION_ALPHABET.length) - 1
+  }
+
+  return label
+}
+
+const buildVersionedTagFieldName = (versionLabel = DEFAULT_VERSION_LABEL, fieldName = '') => `${versionLabel}.${fieldName}`
+
+const parseVersionedTagFieldName = (fieldName = '') => {
+  const normalizedFieldName = normalizeFieldName(fieldName)
+  const matched = normalizedFieldName.match(/^([A-Z]+)\.(一级标签|二级标签)$/)
+
+  if (!matched) {
+    return null
+  }
+
+  return {
+    versionLabel: matched[1],
+    tagFieldName: matched[2]
+  }
+}
+
+const getNextVersionLabel = (fieldMetaList = []) => {
+  const versionIndexes = fieldMetaList
+    .map(item => parseVersionedTagFieldName(item?.name)?.versionLabel)
+    .filter(Boolean)
+    .map(versionLabelToIndex)
+    .filter(index => Number.isInteger(index) && index >= 0)
+
+  if (!versionIndexes.length) {
+    return DEFAULT_VERSION_LABEL
+  }
+
+  return indexToVersionLabel(Math.max(...versionIndexes) + 1)
+}
+
 const buildFlatTagDisplayRows = ({ rows = [], firstLevelTags = [], secondLevelTags = [] } = {}) => {
   const normalizedRows = normalizeTagRows(rows)
   const resolvedFirstLevelTags = uniqueValues(
@@ -203,17 +262,30 @@ const buildColorSeed = (value = '') => String(value)
 
 const resolveTagColor = (value = '') => TAG_COLOR_IDS[buildColorSeed(value) % TAG_COLOR_IDS.length]
 
-const getOrCreateTagField = async (table, fieldName) => {
-  const fieldMetaList = await table.getFieldMetaList()
-  const matchedField = fieldMetaList.find(item => item.name === fieldName)
+const findFieldMetaByName = (fieldMetaList = [], fieldName = '') => {
+  const normalizedFieldName = normalizeFieldName(fieldName)
 
-  if (matchedField) {
-    return {
-      fieldId: matchedField.id,
-      fieldType: matchedField.type
+  return fieldMetaList.find(item => normalizeFieldName(item?.name) === normalizedFieldName) || null
+}
+
+const waitForFieldMeta = async (table, fieldName, maxAttempts = 6, interval = 200) => {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const fieldMetaList = await table.getFieldMetaList()
+    const matchedField = findFieldMetaByName(fieldMetaList, fieldName)
+
+    if (matchedField) {
+      return matchedField
+    }
+
+    if (attempt < maxAttempts - 1) {
+      await delay(interval)
     }
   }
 
+  return null
+}
+
+const addVersionedTagField = async (table, fieldName) => {
   const fieldId = await table.addField({
     name: fieldName,
     type: FieldType.SingleSelect,
@@ -224,8 +296,51 @@ const getOrCreateTagField = async (table, fieldName) => {
 
   return {
     fieldId,
-    fieldType: FieldType.SingleSelect
+    fieldType: FieldType.SingleSelect,
+    fieldName
   }
+}
+
+const createVersionedTagFieldGroup = async (table, versionLabel) => {
+  const firstLevelField = await addVersionedTagField(table, buildVersionedTagFieldName(versionLabel, FIRST_LEVEL_TAG_FIELD_NAME))
+  const secondLevelField = await addVersionedTagField(table, buildVersionedTagFieldName(versionLabel, SECOND_LEVEL_TAG_FIELD_NAME))
+
+  return {
+    versionLabel,
+    firstLevelFieldId: firstLevelField.fieldId,
+    secondLevelFieldId: secondLevelField.fieldId,
+    firstLevelFieldType: firstLevelField.fieldType,
+    secondLevelFieldType: secondLevelField.fieldType,
+    firstLevelFieldName: firstLevelField.fieldName,
+    secondLevelFieldName: secondLevelField.fieldName
+  }
+}
+
+const getVersionedTagFieldGroup = async (table, versionLabel) => {
+  const firstLevelFieldName = buildVersionedTagFieldName(versionLabel, FIRST_LEVEL_TAG_FIELD_NAME)
+  const secondLevelFieldName = buildVersionedTagFieldName(versionLabel, SECOND_LEVEL_TAG_FIELD_NAME)
+  const firstLevelField = await waitForFieldMeta(table, firstLevelFieldName)
+  const secondLevelField = await waitForFieldMeta(table, secondLevelFieldName)
+
+  if (!firstLevelField?.id || !secondLevelField?.id) {
+    throw new Error(`未找到 ${versionLabel} 版本标签列，请稍后重试`)
+  }
+
+  return {
+    versionLabel,
+    firstLevelFieldId: firstLevelField.id,
+    secondLevelFieldId: secondLevelField.id,
+    firstLevelFieldType: firstLevelField.type,
+    secondLevelFieldType: secondLevelField.type,
+    firstLevelFieldName,
+    secondLevelFieldName
+  }
+}
+
+const createNextVersionedTagFieldGroup = async (table) => {
+  const fieldMetaList = await table.getFieldMetaList()
+  const versionLabel = getNextVersionLabel(fieldMetaList)
+  return createVersionedTagFieldGroup(table, versionLabel)
 }
 
 const ensureSelectFieldOptions = async ({ table, fieldId, fieldType, values = [] }) => {
@@ -307,15 +422,182 @@ const buildFieldCellValue = ({ value, fieldType, optionMap = new Map() }) => {
   return normalizedValue
 }
 
-const ensureTagFields = async (table) => {
-  const firstLevelField = await getOrCreateTagField(table, FIRST_LEVEL_TAG_FIELD_NAME)
-  const secondLevelField = await getOrCreateTagField(table, SECOND_LEVEL_TAG_FIELD_NAME)
+const hideDefaultPrimaryTextField = async (table) => {
+  const fieldMetaList = await table.getFieldMetaList()
+  const primaryTextField = fieldMetaList.find(item => {
+    const normalizedFieldName = normalizeFieldName(item?.name)
+    return item?.isPrimary && String(item?.type) === String(FieldType.Text) && normalizedFieldName === PRIMARY_TEXT_FIELD_NAME
+  })
+
+  if (!primaryTextField?.id) {
+    return {
+      hidden: false,
+      fieldId: '',
+      reason: 'not-found'
+    }
+  }
+
+  const activeView = await table.getActiveView().catch(() => null)
+
+  if (!activeView || typeof activeView.hideField !== 'function') {
+    return {
+      hidden: false,
+      fieldId: primaryTextField.id,
+      reason: 'view-not-supported'
+    }
+  }
+
+  await activeView.hideField(primaryTextField.id)
+
+  if (typeof activeView.applySetting === 'function') {
+    await activeView.applySetting().catch(() => {})
+  }
 
   return {
-    firstLevelFieldId: firstLevelField.fieldId,
-    secondLevelFieldId: secondLevelField.fieldId,
-    firstLevelFieldType: firstLevelField.fieldType,
-    secondLevelFieldType: secondLevelField.fieldType
+    hidden: true,
+    fieldId: primaryTextField.id,
+    reason: 'hidden-from-view'
+  }
+}
+
+const writeRowsToFieldGroup = async ({ table, tableId, rowsToWrite, fieldGroup, mode }) => {
+  const {
+    versionLabel,
+    firstLevelFieldId,
+    secondLevelFieldId,
+    firstLevelFieldType,
+    secondLevelFieldType,
+    firstLevelFieldName,
+    secondLevelFieldName
+  } = fieldGroup
+
+  await ensureSelectFieldOptions({
+    table,
+    fieldId: firstLevelFieldId,
+    fieldType: firstLevelFieldType,
+    values: rowsToWrite.map(item => item.label1Tag)
+  })
+
+  await ensureSelectFieldOptions({
+    table,
+    fieldId: secondLevelFieldId,
+    fieldType: secondLevelFieldType,
+    values: rowsToWrite.map(item => item.label2Tag)
+  })
+
+  const firstLevelOptionMap = await getSelectFieldOptionMap({
+    table,
+    fieldId: firstLevelFieldId,
+    fieldType: firstLevelFieldType
+  })
+
+  const secondLevelOptionMap = await getSelectFieldOptionMap({
+    table,
+    fieldId: secondLevelFieldId,
+    fieldType: secondLevelFieldType
+  })
+
+  console.log('字段映射:', {
+    versionLabel,
+    firstLevelFieldId,
+    secondLevelFieldId,
+    firstLevelFieldName,
+    secondLevelFieldName,
+    firstLevelFieldType,
+    secondLevelFieldType,
+    firstLevelOptions: Array.from(firstLevelOptionMap.keys()),
+    secondLevelOptions: Array.from(secondLevelOptionMap.keys())
+  })
+
+  if (mode === 'append-versioned-columns') {
+    const { recordIds, viewId, matchedBy } = await getRecordIdsForOverwrite({ table, tableId })
+
+    console.log('自动匹配到的 recordIds:', recordIds)
+    console.log('匹配方式:', matchedBy)
+    console.log('匹配视图 viewId:', viewId)
+
+    if (!recordIds.length) {
+      throw new Error('目标数据表暂无可匹配记录，无法执行写入')
+    }
+
+    const writableCount = Math.min(recordIds.length, rowsToWrite.length)
+    const matchedRows = rowsToWrite.slice(0, writableCount)
+
+    const recordsToUpdate = matchedRows.map((item, index) => ({
+      recordId: recordIds[index],
+      fields: {
+        [firstLevelFieldId]: buildFieldCellValue({
+          value: item.label1Tag,
+          fieldType: firstLevelFieldType,
+          optionMap: firstLevelOptionMap
+        }),
+        [secondLevelFieldId]: buildFieldCellValue({
+          value: item.label2Tag,
+          fieldType: secondLevelFieldType,
+          optionMap: secondLevelOptionMap
+        })
+      }
+    }))
+
+    const result = await table.setRecords(recordsToUpdate)
+
+    console.log('本次实际写入条数:', writableCount)
+    console.log('未写入的标签条数:', Math.max(rowsToWrite.length - writableCount, 0))
+    console.log('新增标签列写入结果 recordIds:', result)
+
+    return {
+      tableId,
+      mode,
+      versionLabel,
+      recordIds: result,
+      matchedRecordIds: recordIds,
+      updatedCount: recordsToUpdate.length,
+      ignoredMatchedRecordCount: Math.max(recordIds.length - recordsToUpdate.length, 0),
+      unwrittenRowCount: Math.max(rowsToWrite.length - writableCount, 0),
+      requestedRowCount: rowsToWrite.length,
+      matchedBy,
+      viewId,
+      fieldIds: {
+        firstLevelFieldId,
+        secondLevelFieldId
+      },
+      fieldNames: {
+        firstLevelFieldName,
+        secondLevelFieldName
+      }
+    }
+  }
+
+  const result = await table.addRecords(rowsToWrite.map(item => ({
+    fields: {
+      [firstLevelFieldId]: buildFieldCellValue({
+        value: item.label1Tag,
+        fieldType: firstLevelFieldType,
+        optionMap: firstLevelOptionMap
+      }),
+      [secondLevelFieldId]: buildFieldCellValue({
+        value: item.label2Tag,
+        fieldType: secondLevelFieldType,
+        optionMap: secondLevelOptionMap
+      })
+    }
+  })))
+
+  console.log('写入结果 recordIds:', result)
+
+  return {
+    tableId,
+    mode,
+    versionLabel,
+    recordIds: result,
+    fieldIds: {
+      firstLevelFieldId,
+      secondLevelFieldId
+    },
+    fieldNames: {
+      firstLevelFieldName,
+      secondLevelFieldName
+    }
   }
 }
 
@@ -352,13 +634,14 @@ const getRecordIdsForOverwrite = async ({ table, tableId }) => {
   }
 }
 
-export const writeTagRowsToTable = async ({ tableId, rows = [], firstLevelTags = [], secondLevelTags = [], mode = 'append' }) => {
+export const writeTagRowsToTable = async ({ tableId, rows = [], firstLevelTags = [], secondLevelTags = [], mode = 'append-versioned-columns' }) => {
   if (!tableId) {
     throw new Error('缺少 tableId，无法写入数据表')
   }
 
   const normalizedRows = normalizeTagRows(rows)
-  const rowsToWrite = mode === 'append-deduplicated'
+  const shouldUseCompactRows = mode === 'append-deduplicated' || mode === 'append-versioned-columns'
+  const rowsToWrite = shouldUseCompactRows
     ? buildFlatTagDisplayRows({
       rows: normalizedRows,
       firstLevelTags,
@@ -378,131 +661,24 @@ export const writeTagRowsToTable = async ({ tableId, rows = [], firstLevelTags =
     console.log('实际写入的标签数据:', rowsToWrite)
 
     const table = await bitable.base.getTableById(tableId)
-    const {
-      firstLevelFieldId,
-      secondLevelFieldId,
-      firstLevelFieldType,
-      secondLevelFieldType
-    } = await ensureTagFields(table)
-
-    await ensureSelectFieldOptions({
+    const hiddenPrimaryFieldResult = await hideDefaultPrimaryTextField(table).catch(() => ({
+      hidden: false,
+      fieldId: '',
+      reason: 'hide-failed'
+    }))
+    const fieldGroup = await createNextVersionedTagFieldGroup(table)
+    const result = await writeRowsToFieldGroup({
       table,
-      fieldId: firstLevelFieldId,
-      fieldType: firstLevelFieldType,
-      values: rowsToWrite.map(item => item.label1Tag)
+      tableId,
+      rowsToWrite,
+      fieldGroup,
+      mode
     })
 
-    await ensureSelectFieldOptions({
-      table,
-      fieldId: secondLevelFieldId,
-      fieldType: secondLevelFieldType,
-      values: rowsToWrite.map(item => item.label2Tag)
-    })
-
-    const firstLevelOptionMap = await getSelectFieldOptionMap({
-      table,
-      fieldId: firstLevelFieldId,
-      fieldType: firstLevelFieldType
-    })
-
-    const secondLevelOptionMap = await getSelectFieldOptionMap({
-      table,
-      fieldId: secondLevelFieldId,
-      fieldType: secondLevelFieldType
-    })
-
-    console.log('字段映射:', {
-      firstLevelFieldId,
-      secondLevelFieldId,
-      firstLevelFieldType,
-      secondLevelFieldType,
-      firstLevelOptions: Array.from(firstLevelOptionMap.keys()),
-      secondLevelOptions: Array.from(secondLevelOptionMap.keys())
-    })
-
-    if (mode === 'overwrite-selected') {
-      const { recordIds, viewId, matchedBy } = await getRecordIdsForOverwrite({ table, tableId })
-
-      console.log('自动匹配到的 recordIds:', recordIds)
-      console.log('匹配方式:', matchedBy)
-      console.log('匹配视图 viewId:', viewId)
-
-      if (!recordIds.length) {
-        throw new Error('目标数据表暂无可匹配记录，无法执行覆盖写入')
-      }
-
-      const writableCount = Math.min(recordIds.length, rowsToWrite.length)
-      const matchedRows = rowsToWrite.slice(0, writableCount)
-
-      const recordsToUpdate = matchedRows.map((item, index) => ({
-        recordId: recordIds[index],
-        fields: {
-          [firstLevelFieldId]: buildFieldCellValue({
-            value: item.label1Tag,
-            fieldType: firstLevelFieldType,
-            optionMap: firstLevelOptionMap
-          }),
-          [secondLevelFieldId]: buildFieldCellValue({
-            value: item.label2Tag,
-            fieldType: secondLevelFieldType,
-            optionMap: secondLevelOptionMap
-          })
-        }
-      }))
-
-      const result = await table.setRecords(recordsToUpdate)
-
-      console.log('本次实际写入条数:', writableCount)
-      console.log('未写入的标签条数:', Math.max(rowsToWrite.length - writableCount, 0))
-
-      console.log('覆盖写入结果 recordIds:', result)
-      console.groupEnd()
-
-      return {
-        tableId,
-        mode,
-        recordIds: result,
-        matchedRecordIds: recordIds,
-        updatedCount: recordsToUpdate.length,
-        ignoredMatchedRecordCount: Math.max(recordIds.length - recordsToUpdate.length, 0),
-        unwrittenRowCount: Math.max(rowsToWrite.length - writableCount, 0),
-        requestedRowCount: rowsToWrite.length,
-        matchedBy,
-        viewId,
-        fieldIds: {
-          firstLevelFieldId,
-          secondLevelFieldId
-        }
-      }
-    }
-
-    const result = await table.addRecords(rowsToWrite.map(item => ({
-      fields: {
-        [firstLevelFieldId]: buildFieldCellValue({
-          value: item.label1Tag,
-          fieldType: firstLevelFieldType,
-          optionMap: firstLevelOptionMap
-        }),
-        [secondLevelFieldId]: buildFieldCellValue({
-          value: item.label2Tag,
-          fieldType: secondLevelFieldType,
-          optionMap: secondLevelOptionMap
-        })
-      }
-    })))
-
-    console.log('写入结果 recordIds:', result)
+    console.log('默认主文本字段处理结果:', hiddenPrimaryFieldResult)
     console.groupEnd()
 
-    return {
-      tableId,
-      mode,
-      recordIds: result,
-      fieldIds: {
-        firstLevelFieldId,
-        secondLevelFieldId
-      }
-    }
+    return result
   } catch (error) {
     console.error('[Bitable] 写入数据表失败:', error)
     console.groupEnd()
@@ -524,18 +700,20 @@ export const createTagTable = async ({ name, rows = [], firstLevelTags = [], sec
     console.log('新建数据表名称:', tableName)
     console.log('准备写入的标签数据:', normalizedRows)
 
+    const initialVersionLabel = DEFAULT_VERSION_LABEL
+
     const createResult = await bitable.base.addTable({
       name: tableName,
       fields: [
         {
-          name: FIRST_LEVEL_TAG_FIELD_NAME,
+          name: buildVersionedTagFieldName(initialVersionLabel, FIRST_LEVEL_TAG_FIELD_NAME),
           type: FieldType.SingleSelect,
           property: {
             options: []
           }
         },
         {
-          name: SECOND_LEVEL_TAG_FIELD_NAME,
+          name: buildVersionedTagFieldName(initialVersionLabel, SECOND_LEVEL_TAG_FIELD_NAME),
           type: FieldType.SingleSelect,
           property: {
             options: []
@@ -546,19 +724,49 @@ export const createTagTable = async ({ name, rows = [], firstLevelTags = [], sec
 
     console.log('新建数据表结果:', createResult)
 
+    const table = await bitable.base.getTableById(createResult.tableId)
+
+    const hiddenPrimaryFieldResult = await hideDefaultPrimaryTextField(
+      table
+    ).catch((error) => {
+      console.warn('[Bitable] 隐藏默认主字段失败，通常是视图不支持或主字段不可隐藏:', error)
+
+      return {
+        hidden: false,
+        fieldId: '',
+        reason: 'hide-failed'
+      }
+    })
+
+    console.log('默认主文本字段处理结果:', hiddenPrimaryFieldResult)
+
     if (normalizedRows.length) {
-      await writeTagRowsToTable({
-        tableId: createResult.tableId,
+      const fieldGroup = await getVersionedTagFieldGroup(table, initialVersionLabel)
+      const rowsToWrite = buildFlatTagDisplayRows({
         rows: normalizedRows,
         firstLevelTags,
-        secondLevelTags,
+        secondLevelTags
+      })
+
+      await writeRowsToFieldGroup({
+        table,
+        tableId: createResult.tableId,
+        rowsToWrite,
+        fieldGroup,
         mode: 'append-deduplicated'
       })
     }
 
     console.groupEnd()
 
-    return createResult
+    return {
+      ...createResult,
+      versionLabel: initialVersionLabel,
+      fieldNames: {
+        firstLevelFieldName: buildVersionedTagFieldName(initialVersionLabel, FIRST_LEVEL_TAG_FIELD_NAME),
+        secondLevelFieldName: buildVersionedTagFieldName(initialVersionLabel, SECOND_LEVEL_TAG_FIELD_NAME)
+      }
+    }
   } catch (error) {
     console.error('[Bitable] 创建标签数据表失败:', error)
     console.groupEnd()
