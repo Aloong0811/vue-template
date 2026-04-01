@@ -1,21 +1,49 @@
-const DEFAULT_FIRST_LEVEL_TAGS = [
-  '人群画像',
+const LOCKED_FIRST_LEVEL_TAGS = [
+  '无法归类',
+  '基础属性',
+  '外观特征',
+  '质量感受',
+  '使用体验',
   '使用场景',
-  '核心卖点',
-  '体验反馈',
-  '购买动机',
-  '情绪倾向',
-  '内容方向'
+  '功能效果',
+  '价格价值',
+  '物流服务',
+  '客户服务'
 ]
 
+const DEFAULT_FIRST_LEVEL_TAGS = [...LOCKED_FIRST_LEVEL_TAGS]
+
 const DEFAULT_SECOND_LEVEL_TAGS = [
-  '价格敏感',
-  '日常通勤',
-  '功能实用',
-  '效果明显',
-  '复购意愿',
-  '正向口碑',
-  '传播素材'
+  '无法归类',
+  '数量规格',
+  '材质',
+  '重量',
+  '尺寸大小',
+  '成分材料',
+  '颜色',
+  '造型',
+  '风格',
+  '包装',
+  '耐用性',
+  '工艺水平',
+  '稳定性',
+  '厚薄',
+  '软硬',
+  '舒适度',
+  '易用性',
+  '便利性',
+  '味道',
+  '维护成本',
+  '上手难易度',
+  '送礼场景',
+  '价格折扣',
+  '赠品',
+  '品牌比较',
+  '是否回购',
+  '物流速度',
+  '错漏发',
+  '破损',
+  '客户服务'
 ]
 
 const DEEPSEEK_BASE_URL = import.meta.env.VITE_DEEPSEEK_BASE_URL || 'https://api.deepseek.com'
@@ -54,6 +82,16 @@ const SYSTEM_PROMPT = [
 const MARKDOWN_TABLE_TEMPLATE = [
   '| 一级标签 | 二级标签 |',
   '| --- | --- |'
+].join('\n')
+
+const LOCKED_FIRST_LEVEL_TAGS_TEXT = LOCKED_FIRST_LEVEL_TAGS.join('、')
+
+const FIRST_LEVEL_TAG_STRICT_RULES = [
+  `一级标签可选范围严格且仅限于：${LOCKED_FIRST_LEVEL_TAGS_TEXT}。`,
+  '禁止输出任何不在上述名单中的一级标签，禁止使用近义词、上位词、下位词或自造标签。',
+  '例如：人群画像、核心卖点、体验反馈、购买动机、情绪倾向、内容方向等都属于违规一级标签，绝对不能出现。',
+  '如果某条内容无法归入其他允许的一级标签，只能归入“无法归类”，不能新造一级标签。',
+  '输出前请逐行自检：只要一级标签不在允许名单内，就必须改写为“无法归类”。'
 ].join('\n')
 
 const AUDIENCE_PROFILE_MAP = {
@@ -275,7 +313,8 @@ const buildReviewPrompt = (payload) => {
     '要求3：所有的2级标签，必须归属于1级标签的体系之下。',
     '要求4：我是有经验的标签设计师，我设计的1级标签符合MECE原则的，你需要在我的约束条件下，基于语义进行2级标签的补充。',
     '',
-    '1级标签我已经锁死，不要添加其他任何内容，它们分别是：无法归类、基础属性、外观特征、质量感受、使用体验、使用场景、功能效果、价格价值、物流服务、客户服务。',
+    `1级标签我已经锁死，不要添加其他任何内容，它们分别是：${LOCKED_FIRST_LEVEL_TAGS_TEXT}。`,
+    FIRST_LEVEL_TAG_STRICT_RULES,
     '',
     '【无法归类】包含的2级标签有：无法归类。',
     '【基础属性】包含的2级标签有：数量规格、材质、重量、尺寸大小、成分材料。',
@@ -320,7 +359,8 @@ const buildQaPrompt = (payload) => {
     '要求3：所有的2级标签，必须归属于1级标签的体系之下。',
     '要求4：我是有经验的标签设计师，我设计的1级标签符合MECE原则的，你需要在我的约束条件下，基于语义进行2级标签的补充。',
     '',
-    '1级标签我已经锁死，不要添加其他任何内容，它们分别是：无法归类、基础属性、外观特征、质量感受、使用体验、使用场景、功能效果、价格价值、物流服务、客户服务。',
+    `1级标签我已经锁死，不要添加其他任何内容，它们分别是：${LOCKED_FIRST_LEVEL_TAGS_TEXT}。`,
+    FIRST_LEVEL_TAG_STRICT_RULES,
     '',
     '【无法归类】包含的2级标签有：无法归类。',
     '【基础属性】包含的2级标签有：数量规格、材质、重量、尺寸大小、成分材料。',
@@ -369,7 +409,8 @@ const buildProductPrompt = (payload) => {
     '要求3：所有的2级标签，必须归属于1级标签的体系之下。',
     '要求4：我是有经验的标签设计师，我设计的1级标签符合MECE原则的，你需要在我的约束条件下，基于语义进行2级标签的补充。',
     '',
-    '1级标签我已经锁死，不要添加其他任何内容，它们分别是：无法归类、基础属性、外观特征、质量感受、使用体验、使用场景、功能效果、价格价值、物流服务、客户服务。',
+    `1级标签我已经锁死，不要添加其他任何内容，它们分别是：${LOCKED_FIRST_LEVEL_TAGS_TEXT}。`,
+    FIRST_LEVEL_TAG_STRICT_RULES,
     '',
     '要求5：你所有自主添加的标签，不能和其他所有的2级标签重复，要符合MECE原则。如果你发现有与其他2级标签含义重复，你可以不添加任何2级标签。',
     '要求6：在输出之前，请基于你设计的2级标签轮循检查、反复验证，所有2级标签请尽量做到MECE原则。例如：功能效果、使用体验、质量感受这3个模块的2级标签很容易重复，请仔细检查并调整。',
@@ -700,13 +741,25 @@ const unwrapTagPayload = (items) => {
 
 const uniqueValues = (items) => [...new Set(items.filter(Boolean))]
 
+const normalizeFirstLevelTag = (value) => {
+  const normalized = String(value || '').trim()
+
+  if (!normalized) {
+    return '无法归类'
+  }
+
+  return LOCKED_FIRST_LEVEL_TAGS.includes(normalized)
+    ? normalized
+    : '无法归类'
+}
+
 const buildNormalizedResultFromRows = (rows) => {
   const seen = new Set()
 
   const cleanedRows = rows
     .map((item, index) => ({
       id: item?.id || index + 1,
-      label1Tag: String(item?.label1Tag || '').trim(),
+      label1Tag: normalizeFirstLevelTag(item?.label1Tag),
       label2Tag: String(item?.label2Tag || '').trim()
     }))
     .filter(item => item.label1Tag || item.label2Tag)
@@ -735,7 +788,7 @@ const buildNormalizedResultFromRows = (rows) => {
     }
   }
 
-  const firstLevelTags = uniqueValues(cleaned.map(item => item.label1Tag).concat(DEFAULT_FIRST_LEVEL_TAGS))
+  const firstLevelTags = [...DEFAULT_FIRST_LEVEL_TAGS]
   const secondLevelTags = uniqueValues(cleaned.map(item => item.label2Tag).concat(DEFAULT_SECOND_LEVEL_TAGS))
 
   return {
@@ -781,7 +834,7 @@ const normalizePayloadSourceRecords = (payload = {}) => {
 const normalizeRawRows = (items) => unwrapTagPayload(items)
   .map((item, index) => ({
     id: item?.id || index + 1,
-    label1Tag: String(item?.label1Tag || '').trim(),
+    label1Tag: normalizeFirstLevelTag(item?.label1Tag),
     label2Tag: String(item?.label2Tag || '').trim()
   }))
   .filter(item => item.label1Tag || item.label2Tag)
