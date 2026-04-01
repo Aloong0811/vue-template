@@ -41,13 +41,14 @@ const fieldLoading = ref(false)
 let stopSelectionWatch = null
 
 const audienceOptions = [
-  'GenZ世代(15-25岁)',
-  '资深中产(35-50岁)',
-  '精致妈妈（28-40岁）',
-  '都市蓝领(22-45岁)',
-  '新锐白领(25-35岁)',
-  '银发乐活族(55岁以上)',
-  '小镇青年(18-30岁)'
+  '都市GenZ（一二线城市的95后/00后）',
+  '小镇GenZ（三四线及以下城市的95后/00后）',
+  '都市银发（一二线城市的50岁以上人群）',
+  '小镇中老年（三四线及以下城市的50岁以上人群）',
+  '精致妈妈（28-45岁，有孩家庭女性）',
+  '新锐白领（25-35岁，都市职场精英）',
+  '资深中产（35-50岁，事业稳定人群）',
+  '都市蓝领（22-45岁，城市服务业/制造业从业者）'
 ]
 
 const formData = reactive({
@@ -62,6 +63,18 @@ const formData = reactive({
 
 const currentTable = computed(() => tableOptions.value.find(item => item.id === formData.table) || null)
 const currentField = computed(() => fieldOptions.value.find(item => item.id === formData.field) || null)
+const canGenerate = computed(() => {
+  const hasProductName = Boolean(formData.productName.trim())
+
+  if (formData.mode === 'data') {
+    return hasProductName && Boolean(formData.table) && Boolean(formData.field)
+  }
+
+  const hasCoreFeature = Boolean(formData.coreFeature.trim())
+  const hasAudiences = Array.isArray(formData.audiences) && formData.audiences.length > 0
+
+  return hasProductName && hasCoreFeature && hasAudiences
+})
 
 const applySelection = async (selection) => {
   if (!selection?.tableId) {
@@ -162,6 +175,10 @@ const toggleAudience = (item) => {
 }
 
 const handleGenerate = () => {
+  if (!canGenerate.value) {
+    return
+  }
+
   emit('generate', {
     mode: formData.mode,
     productName: formData.productName,
@@ -269,6 +286,8 @@ onBeforeUnmount(() => {
           placeholder="产品的核心功能"
         >
 
+        <div class="field-title">产品核心人群</div>
+
         <div class="choice-grid audience-grid">
           <button
             v-for="item in audienceOptions"
@@ -287,7 +306,7 @@ onBeforeUnmount(() => {
       </template>
     </div>
 
-    <button type="button" class="submit-btn" :disabled="loading" @click="handleGenerate">
+    <button type="button" class="submit-btn" :disabled="loading || !canGenerate" @click="handleGenerate">
       {{ loading ? '生成中...' : '生成标签' }}
     </button>
   </section>
@@ -449,6 +468,14 @@ onBeforeUnmount(() => {
   font-size: 12px;
   line-height: 1.5;
   color: #f53f3f;
+}
+
+.field-title {
+  margin: 2px 2px -2px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #1f2329;
+  font-weight: 600;
 }
 
 .choice-grid {

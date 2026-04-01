@@ -32,7 +32,7 @@ const handleSubmit = () => {
     <div class="login-card">
       <div class="login-brand">HXL</div>
       <h1>系统登录</h1>
-      <p class="login-subtitle">请输入用户名和密码后进入标签系统</p>
+      <p class="login-subtitle">请输入用户名和密码后进入饭大AI标签</p>
 
       <div class="form-stack">
         <input

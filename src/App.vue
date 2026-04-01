@@ -199,7 +199,7 @@ onMounted(() => {
     <div v-else class="page-stage">
       <div class="page-header">
         <div>
-          <h1>飞书标签系统</h1>
+          <h1>饭大AI标签</h1>
           <p>登录成功后可生成标签并写入多维表格</p>
         </div>
 
